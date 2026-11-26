@@ -46,29 +46,29 @@ ZIP および GitHub Actions で作成される `firmware` には、以下のUF2
 
 | ファイル | 構成 |
 | --- | --- |
-| `zen_right_trackball_pmw3610_central-bmp_boost-zmk.uf2` | PMW3610（標準） |
-| `zen_right_trackball_paw3222_central-bmp_boost-zmk.uf2` | PAW3222 |
-| `zen_right_trackpad_central-bmp_boost-zmk.uf2` | トラックパッド |
+| `zen_right_trackball_pmw3610_central.uf2` | PMW3610（標準） |
+| `zen_right_trackball_paw3222_central.uf2` | PAW3222 |
+| `zen_right_trackpad_central.uf2` | トラックパッド |
 
 左手 — お使いの構成に合うものを1つ
 
 | ファイル | 構成 |
 | --- | --- |
-| `zen_left_peripheral-bmp_boost-zmk.uf2` | トラックパッドなし（標準） |
-| `zen_left_trackpad_peripheral-bmp_boost-zmk.uf2` | トラックパッドあり |
+| `zen_left_peripheral.uf2` | トラックパッドなし（標準） |
+| `zen_left_trackpad_peripheral.uf2` | トラックパッドあり |
 
 標準構成なら、右手は PMW3610 用、左手はトラックパッドなし用の2つです。
 
-このほかに、設定リセット用の `settings_reset-bmp_boost-zmk.uf2` が入っています。通常は使いません。
+このほかに、設定リセット用の `settings_reset.uf2` が入っています。通常は使いません。
 
 ## 設定を元に戻したいとき
 
 Configuratorの「プリセット」→「出荷時の設定に戻す」で、Configuratorから変更したキー配置とマウス操作をキーボードから消せます。ファームウェアに入っている元の設定に戻ります。無線の登録は消えません。
 
-無線接続そのものがうまくいかない場合は、`settings_reset-bmp_boost-zmk.uf2` を使います。こちらは無線の登録も消えます。
+無線接続そのものがうまくいかない場合は、`settings_reset.uf2` を使います。こちらは無線の登録も消えます。
 
 1. PCやMacの接続設定から `ZEN` を削除します
-2. `settings_reset-bmp_boost-zmk.uf2` を書き込みます
+2. `settings_reset.uf2` を書き込みます
 3. USBを外します
 4. ZENの電源を入れます
 5. もう一度通常ファームウェアを書き込みます
