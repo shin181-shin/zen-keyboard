@@ -106,6 +106,22 @@
         status = "disabled";
     };
 
+    behaviors {
+        /* Plays one of the editable macro slots; the parameter is the slot
+           number. Deliberately NOT /omit-if-no-ref/: nothing in the keymap
+           refers to it, because a slot is bound at runtime -- by the
+           Configurator, or by a runtime combo -- so omitting unreferenced
+           nodes would delete the only thing that can play one.
+
+           The node costs nothing where CONFIG_ZEN_RUNTIME_MACRO is off (a
+           split peripheral, where the Configurator bridge is off too): the
+           driver is not compiled, so no device is instantiated. */
+        zen_macro: zen_macro {
+            compatible = "zen,behavior-macro";
+            #binding-cells = <1>;
+        };
+    };
+
     vbatt: vbatt {
         status = "disabled";
     };

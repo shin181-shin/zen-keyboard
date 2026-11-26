@@ -54,6 +54,27 @@ enum zen_config_wire_command {
     ZEN_CONFIG_CMD_GET_STATUS = 0x20,
     ZEN_CONFIG_CMD_GET_BLE_PROFILES = 0x21,
     ZEN_CONFIG_CMD_BLE_ACTION = 0x22,
+
+    /* Editable combos. Only present when CONFIG_ZEN_RUNTIME_COMBO is on,
+     * which shipped firmware leaves off; both answer ERR_UNKNOWN_COMMAND
+     * otherwise, so a host can probe with GET_COMBO_META. */
+    ZEN_CONFIG_CMD_GET_COMBO_META = 0x30,
+    ZEN_CONFIG_CMD_SET_COMBO = 0x31,
+    ZEN_CONFIG_CMD_GET_COMBO = 0x32,
+    /* An edit takes effect at once but is only in RAM until this. Trying a
+     * combo out and pulling the cable should leave nothing behind. */
+    ZEN_CONFIG_CMD_SAVE_COMBO = 0x33,
+    /* Empties every slot and drops the saved record, so the keyboard comes
+     * back on the combos compiled into the firmware. */
+    ZEN_CONFIG_CMD_RESET_COMBO = 0x34,
+
+    /* Editable macros. Only present when CONFIG_ZEN_RUNTIME_MACRO is on;
+     * probe with GET_MACRO_META the way combos are probed. */
+    ZEN_CONFIG_CMD_GET_MACRO_META = 0x40,
+    ZEN_CONFIG_CMD_SET_MACRO = 0x41,
+    ZEN_CONFIG_CMD_GET_MACRO = 0x42,
+    ZEN_CONFIG_CMD_SAVE_MACRO = 0x43,
+    ZEN_CONFIG_CMD_RESET_MACRO = 0x44,
 };
 
 /* CMD_BLE_ACTION request payload: { action, profile_index }. The index is
@@ -78,6 +99,9 @@ enum zen_config_status {
     ZEN_CONFIG_STATUS_ERR_UNKNOWN_BEHAVIOR = 5,
     ZEN_CONFIG_STATUS_ERR_NOT_SUPPORTED = 6,
     ZEN_CONFIG_STATUS_ERR_GENERIC = 7,
+    /* The combo table renumbers itself on every edit and an in-flight press
+     * holds an index into it, so a write lands only with no keys down. */
+    ZEN_CONFIG_STATUS_ERR_BUSY = 8,
 };
 
 /* Wire layout for CMD_GET_POINTER's response payload (after the status byte)
@@ -99,6 +123,50 @@ enum zen_config_status {
  * and as CMD_SET_BINDING's request payload tail. */
 #define ZEN_CONFIG_WIRE_BINDING_SIZE (ZEN_CONFIG_WIRE_BEHAVIOR_NAME_LEN + 4u + 4u)
 
+/* Wire layout for CMD_SET_COMBO's request payload. The framing validates one
+ * fixed length per command, so the key-positions array is always full length
+ * and only the first `count` entries are read.
+ *   [0]      slot index
+ *   [1]      key count; 0 clears the slot
+ *   [2-5]    layer mask, le32; 0 means every layer
+ *   [6-7]    timeout, le16 ms
+ *   [8..]    key positions, le16 each, ZEN_CONFIG_WIRE_COMBO_MAX_KEYS of them
+ *   [..]     one binding entry, as CMD_SET_BINDING carries
+ *
+ * GET_COMBO_META's response payload is { slots, firmware max keys, wire max
+ * keys }: the firmware's own limit is CONFIG_ZEN_RUNTIME_COMBO_MAX_KEYS and
+ * may be lower than the wire's, so a host has to read it rather than assume. */
+#define ZEN_CONFIG_WIRE_COMBO_MAX_KEYS 6u
+#define ZEN_CONFIG_WIRE_COMBO_PAYLOAD_SIZE                                                         \
+    (8u + 2u * ZEN_CONFIG_WIRE_COMBO_MAX_KEYS + ZEN_CONFIG_WIRE_BINDING_SIZE)
+
+/* CMD_GET_COMBO takes one byte, the slot, and answers with exactly the
+ * payload CMD_SET_COMBO takes -- so a host can read a slot, change one field
+ * and send it straight back. An empty slot answers with count 0 and the rest
+ * zeroed. */
+#define ZEN_CONFIG_WIRE_GET_COMBO_REQUEST_SIZE 1u
+
+/* Wire layout for CMD_SET_MACRO's request payload and CMD_GET_MACRO's
+ * response. One fixed length per command, so the step array is always full
+ * and only the first `count` entries are read.
+ *   [0]    slot index
+ *   [1]    step count; 0 empties the slot
+ *   [2-3]  reserved, zero
+ *   [4..]  steps, ZEN_CONFIG_WIRE_MACRO_MAX_STEPS of them, each:
+ *            [0]   op (0 tap, 1 press, 2 release, 3 wait)
+ *            [1-3] reserved, zero
+ *            [4-7] value, le32 -- a ZMK keycode, or milliseconds for wait
+ *
+ * A wait applies after the step before it; one in first place has nothing to
+ * delay and is ignored. GET_MACRO_META answers { slots, firmware max steps,
+ * wire max steps }, so a host reads the firmware's limit rather than assuming
+ * this one. */
+#define ZEN_CONFIG_WIRE_MACRO_MAX_STEPS 16u
+#define ZEN_CONFIG_WIRE_MACRO_STEP_SIZE 8u
+#define ZEN_CONFIG_WIRE_MACRO_PAYLOAD_SIZE                                                         \
+    (4u + ZEN_CONFIG_WIRE_MACRO_MAX_STEPS * ZEN_CONFIG_WIRE_MACRO_STEP_SIZE)
+#define ZEN_CONFIG_WIRE_GET_MACRO_REQUEST_SIZE 1u
+
 /* Wire layout for CMD_GET_STATUS's response payload (after the status
  * byte). Fields that don't apply to this board/role (e.g. peripheral
  * battery on a non-split build) are 0xFF. Byte order:
@@ -110,8 +178,15 @@ enum zen_config_status {
  *                                 peripheral: connected to its central)
  *   [5] active_profile_index    (0-4, central only, else 0xFF)
  *   [6] transport                (0 = USB, 1 = BLE, central only, else 0xFF)
+ *   [7] side                     (0 = unknown, 1 = left, 2 = right)
+ *
+ * [7] was added later. A host that reads a 7-byte payload is talking to
+ * firmware from before the LCD build existed, where the central is always the
+ * right half; treat the side as unknown and assume right. It matters because
+ * an LCD build inverts the halves, and the host otherwise labels the two
+ * batteries the wrong way round.
  */
-#define ZEN_CONFIG_WIRE_STATUS_PAYLOAD_SIZE 7u
+#define ZEN_CONFIG_WIRE_STATUS_PAYLOAD_SIZE 8u
 
 /* Wire layout for CMD_GET_BLE_PROFILES' and CMD_BLE_ACTION's response
  * payload (after the status byte). Byte order:

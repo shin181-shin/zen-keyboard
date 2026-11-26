@@ -16,6 +16,16 @@ if(CONFIG_SHIELD_ZEN_LEFT OR CONFIG_SHIELD_ZEN_RIGHT)
   # See Kconfig: central-or-standalone only, and never alongside ZMK Studio,
   # which listens on the same UART.
   zephyr_library_sources_ifdef(CONFIG_ZEN_CONFIG_BRIDGE src/zen_config_serial_bridge.c)
+  # Prototype, off in shipped firmware. See docs/runtime-combo-prototype.md.
+  zephyr_library_sources_ifdef(CONFIG_ZEN_RUNTIME_COMBO src/zen_combo_settings.c)
+  zephyr_library_sources_ifdef(CONFIG_ZEN_RUNTIME_MACRO src/zen_macro.c)
   zephyr_library_sources_ifdef(CONFIG_PMW3610_ALT drivers/pmw3610_alt/src/pmw3610.c)
   zephyr_library_sources_ifdef(CONFIG_IQS7211E drivers/iqs7211e/src/iqs7211e.c drivers/iqs7211e/src/iqs7211e_reg.c)
+  # Only built by a target that selects the zen-lcd-status snippet. The LCD is
+  # an optional build, not part of what ships -- see docs/lcd-build.md.
+  zephyr_library_sources_ifdef(CONFIG_ZEN_LCD_STATUS_SCREEN
+    src/zen_lcd_status_screen.c
+    src/zen_dot_fonts.c
+    src/zen_font_unscii_8x16.c
+  )
 endif()

@@ -55,9 +55,19 @@
 #include <zmk/split/bluetooth/peripheral.h>
 #endif
 
+#if IS_ENABLED(CONFIG_ZEN_RUNTIME_COMBO)
+#include <zen/runtime_combo.h>
+#endif
+
 #include "zen_config_codec.h"
 #include "zen_config_wire.h"
 #include "zen_pointer_settings.h"
+#if IS_ENABLED(CONFIG_ZEN_RUNTIME_COMBO)
+#include "zen/combo_settings.h"
+#endif
+#if IS_ENABLED(CONFIG_ZEN_RUNTIME_MACRO)
+#include "zen/macro.h"
+#endif
 
 LOG_MODULE_REGISTER(zen_config_serial_bridge, CONFIG_ZMK_LOG_LEVEL);
 
@@ -75,11 +85,44 @@ static const struct device *const zen_config_serial = DEVICE_DT_GET(ZEN_CONFIG_S
 static const struct device *const zen_config_serial;
 #endif
 
+#if IS_ENABLED(CONFIG_ZEN_RUNTIME_COMBO)
+#define ZEN_CONFIG_COMBO_REQUEST_PAYLOAD ZEN_CONFIG_WIRE_COMBO_PAYLOAD_SIZE
+#else
+#define ZEN_CONFIG_COMBO_REQUEST_PAYLOAD 0u
+#endif
+
+#if IS_ENABLED(CONFIG_ZEN_RUNTIME_MACRO)
+#define ZEN_CONFIG_MACRO_REQUEST_PAYLOAD ZEN_CONFIG_WIRE_MACRO_PAYLOAD_SIZE
+#else
+#define ZEN_CONFIG_MACRO_REQUEST_PAYLOAD 0u
+#endif
+
 #define ZEN_CONFIG_MAX_REQUEST_PAYLOAD                                                            \
-    MAX(ZEN_CONFIG_WIRE_POINTER_PAYLOAD_SIZE, 1u + 2u + ZEN_CONFIG_WIRE_BINDING_SIZE)
-/* SET_BINDING is comfortably the largest request, so the BLE commands do not
- * move the number above -- assert it rather than trusting that to stay true. */
+    MAX(MAX(ZEN_CONFIG_WIRE_POINTER_PAYLOAD_SIZE, 1u + 2u + ZEN_CONFIG_WIRE_BINDING_SIZE),        \
+        MAX(MAX((size_t)ZEN_CONFIG_WIRE_AUTO_MOUSE_PAYLOAD_SIZE,                                 \
+                ZEN_CONFIG_COMBO_REQUEST_PAYLOAD),                                               \
+            ZEN_CONFIG_MACRO_REQUEST_PAYLOAD))
+
+/* One assert per request, not one for the largest. The note here used to say
+ * SET_BINDING was comfortably the biggest and asserted only >= 2, so when
+ * SET_COMBO arrived at 44 bytes it overran this buffer by 9 and the build
+ * stayed green -- only -Warray-bounds caught it. Adding a command now fails
+ * the build instead. */
 BUILD_ASSERT(ZEN_CONFIG_MAX_REQUEST_PAYLOAD >= 2u, "request buffer too small for BLE_ACTION");
+BUILD_ASSERT(ZEN_CONFIG_MAX_REQUEST_PAYLOAD >= ZEN_CONFIG_WIRE_POINTER_PAYLOAD_SIZE,
+             "request buffer too small for SET_POINTER");
+BUILD_ASSERT(ZEN_CONFIG_MAX_REQUEST_PAYLOAD >= ZEN_CONFIG_WIRE_AUTO_MOUSE_PAYLOAD_SIZE,
+             "request buffer too small for SET_AUTO_MOUSE");
+BUILD_ASSERT(ZEN_CONFIG_MAX_REQUEST_PAYLOAD >= 1u + 2u + ZEN_CONFIG_WIRE_BINDING_SIZE,
+             "request buffer too small for SET_BINDING");
+#if IS_ENABLED(CONFIG_ZEN_RUNTIME_MACRO)
+BUILD_ASSERT(ZEN_CONFIG_MAX_REQUEST_PAYLOAD >= ZEN_CONFIG_WIRE_MACRO_PAYLOAD_SIZE,
+             "request buffer too small for SET_MACRO");
+#endif
+#if IS_ENABLED(CONFIG_ZEN_RUNTIME_COMBO)
+BUILD_ASSERT(ZEN_CONFIG_MAX_REQUEST_PAYLOAD >= ZEN_CONFIG_WIRE_COMBO_PAYLOAD_SIZE,
+             "request buffer too small for SET_COMBO");
+#endif
 #define ZEN_CONFIG_MAX_RESPONSE_PAYLOAD (1u + (size_t)ZMK_KEYMAP_LEN * ZEN_CONFIG_WIRE_BINDING_SIZE)
 
 static uint8_t rx_buffer[ZEN_CONFIG_WIRE_HEADER_SIZE + ZEN_CONFIG_MAX_REQUEST_PAYLOAD];
@@ -127,6 +170,27 @@ static size_t expected_request_payload_len(uint8_t command) {
         return 0;
     case ZEN_CONFIG_CMD_BLE_ACTION:
         return 2; /* action, profile index */
+#if IS_ENABLED(CONFIG_ZEN_RUNTIME_COMBO)
+    case ZEN_CONFIG_CMD_GET_COMBO_META:
+        return 0;
+    case ZEN_CONFIG_CMD_SET_COMBO:
+        return ZEN_CONFIG_WIRE_COMBO_PAYLOAD_SIZE;
+    case ZEN_CONFIG_CMD_GET_COMBO:
+        return ZEN_CONFIG_WIRE_GET_COMBO_REQUEST_SIZE;
+    case ZEN_CONFIG_CMD_SAVE_COMBO:
+    case ZEN_CONFIG_CMD_RESET_COMBO:
+        return 0;
+#endif
+#if IS_ENABLED(CONFIG_ZEN_RUNTIME_MACRO)
+    case ZEN_CONFIG_CMD_GET_MACRO_META:
+    case ZEN_CONFIG_CMD_SAVE_MACRO:
+    case ZEN_CONFIG_CMD_RESET_MACRO:
+        return 0;
+    case ZEN_CONFIG_CMD_SET_MACRO:
+        return ZEN_CONFIG_WIRE_MACRO_PAYLOAD_SIZE;
+    case ZEN_CONFIG_CMD_GET_MACRO:
+        return ZEN_CONFIG_WIRE_GET_MACRO_REQUEST_SIZE;
+#endif
     default:
         return SIZE_MAX;
     }
@@ -428,6 +492,17 @@ static void handle_get_status(void) {
     payload[6] = (uint8_t)zmk_endpoints_selected().transport;
 #endif
 
+    /* Which half this is. The host cannot infer it from the role: shipping
+     * firmware makes the right half the central, and an LCD build makes the
+     * left one, because the trackball and the display cannot share spi0. */
+#if IS_ENABLED(CONFIG_SHIELD_ZEN_LEFT)
+    payload[7] = 1;
+#elif IS_ENABLED(CONFIG_SHIELD_ZEN_RIGHT)
+    payload[7] = 2;
+#else
+    payload[7] = 0;
+#endif
+
     send_response(ZEN_CONFIG_CMD_GET_STATUS, ZEN_CONFIG_STATUS_OK, payload, sizeof(payload));
 }
 
@@ -578,6 +653,189 @@ static void handle_reset_keymap(void) {
 
 #endif /* !IS_ENABLED(CONFIG_ZMK_SPLIT) || IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) */
 
+#if IS_ENABLED(CONFIG_ZEN_RUNTIME_COMBO)
+
+/* Prototype: an edited combo lives in RAM only. Nothing is written to
+ * settings yet, so it is gone after a reset. Persistence is the next step. */
+static void handle_get_combo_meta(void) {
+    uint8_t response[3] = {
+        (uint8_t)zen_runtime_combo_slot_count(),
+        (uint8_t)zen_runtime_combo_max_keys(),
+        (uint8_t)ZEN_CONFIG_WIRE_COMBO_MAX_KEYS,
+    };
+    send_response(ZEN_CONFIG_CMD_GET_COMBO_META, ZEN_CONFIG_STATUS_OK, response,
+                  sizeof(response));
+}
+
+static void handle_set_combo(const uint8_t *payload) {
+    uint8_t slot = payload[0];
+    uint8_t count = payload[1];
+    uint32_t layer_mask = sys_get_le32(&payload[2]);
+    uint16_t timeout_ms = sys_get_le16(&payload[6]);
+    const uint8_t *positions_raw = &payload[8];
+    const uint8_t *binding_entry = &positions_raw[2 * ZEN_CONFIG_WIRE_COMBO_MAX_KEYS];
+
+    if (count > ZEN_CONFIG_WIRE_COMBO_MAX_KEYS) {
+        send_response(ZEN_CONFIG_CMD_SET_COMBO, ZEN_CONFIG_STATUS_ERR_INVALID_PAYLOAD, NULL, 0);
+        return;
+    }
+
+    int32_t positions[ZEN_CONFIG_WIRE_COMBO_MAX_KEYS] = {0};
+    for (size_t i = 0; i < count; i++) {
+        positions[i] = sys_get_le16(&positions_raw[2 * i]);
+    }
+
+    struct zmk_behavior_binding binding = {0};
+    if (count > 0) {
+        char name[ZEN_CONFIG_WIRE_BEHAVIOR_NAME_LEN];
+        memcpy(name, binding_entry, sizeof(name));
+        name[sizeof(name) - 1] = '\0';
+
+        const struct device *behavior_dev = zmk_behavior_get_binding(name);
+        if (!behavior_dev) {
+            send_response(ZEN_CONFIG_CMD_SET_COMBO, ZEN_CONFIG_STATUS_ERR_UNKNOWN_BEHAVIOR, NULL,
+                          0);
+            return;
+        }
+
+        binding.behavior_dev = behavior_dev->name;
+        binding.param1 = sys_get_le32(&binding_entry[ZEN_CONFIG_WIRE_BEHAVIOR_NAME_LEN]);
+        binding.param2 = sys_get_le32(&binding_entry[ZEN_CONFIG_WIRE_BEHAVIOR_NAME_LEN + 4]);
+
+        if (zmk_behavior_validate_binding(&binding) < 0) {
+            send_response(ZEN_CONFIG_CMD_SET_COMBO, ZEN_CONFIG_STATUS_ERR_INVALID_PAYLOAD, NULL,
+                          0);
+            return;
+        }
+    }
+
+    int rc = zen_runtime_combo_set(slot, positions, count, layer_mask, timeout_ms, &binding);
+    uint8_t status = rc == 0          ? ZEN_CONFIG_STATUS_OK
+                     : rc == -EINVAL  ? ZEN_CONFIG_STATUS_ERR_INVALID_PAYLOAD
+                     : rc == -EBUSY   ? ZEN_CONFIG_STATUS_ERR_BUSY
+                                      : ZEN_CONFIG_STATUS_ERR_GENERIC;
+    send_response(ZEN_CONFIG_CMD_SET_COMBO, status, NULL, 0);
+}
+
+static void handle_get_combo(const uint8_t *payload) {
+    uint8_t slot = payload[0];
+
+    int32_t positions[ZEN_CONFIG_WIRE_COMBO_MAX_KEYS] = {0};
+    size_t len = 0;
+    uint32_t layer_mask = 0;
+    int32_t timeout_ms = 0;
+    struct zmk_behavior_binding binding = {0};
+
+    if (zen_runtime_combo_get(slot, positions, &len, &layer_mask, &timeout_ms, &binding) < 0) {
+        send_response(ZEN_CONFIG_CMD_GET_COMBO, ZEN_CONFIG_STATUS_ERR_INVALID_PAYLOAD, NULL, 0);
+        return;
+    }
+
+    uint8_t response[ZEN_CONFIG_WIRE_COMBO_PAYLOAD_SIZE] = {0};
+    response[0] = slot;
+    response[1] = (uint8_t)len;
+    sys_put_le32(layer_mask, &response[2]);
+    sys_put_le16((uint16_t)timeout_ms, &response[6]);
+    for (size_t i = 0; i < len && i < ZEN_CONFIG_WIRE_COMBO_MAX_KEYS; i++) {
+        sys_put_le16((uint16_t)positions[i], &response[8 + 2 * i]);
+    }
+    uint8_t *binding_entry = &response[8 + 2 * ZEN_CONFIG_WIRE_COMBO_MAX_KEYS];
+    if (len > 0 && binding.behavior_dev) {
+        strncpy((char *)binding_entry, binding.behavior_dev,
+                ZEN_CONFIG_WIRE_BEHAVIOR_NAME_LEN - 1);
+        sys_put_le32((uint32_t)binding.param1, &binding_entry[ZEN_CONFIG_WIRE_BEHAVIOR_NAME_LEN]);
+        sys_put_le32((uint32_t)binding.param2,
+                     &binding_entry[ZEN_CONFIG_WIRE_BEHAVIOR_NAME_LEN + 4]);
+    }
+
+    send_response(ZEN_CONFIG_CMD_GET_COMBO, ZEN_CONFIG_STATUS_OK, response, sizeof(response));
+}
+
+static void handle_save_combo(void) {
+    int rc = zen_combo_settings_save();
+    send_response(ZEN_CONFIG_CMD_SAVE_COMBO,
+                  rc == 0 ? ZEN_CONFIG_STATUS_OK : ZEN_CONFIG_STATUS_ERR_GENERIC, NULL, 0);
+}
+
+static void handle_reset_combo(void) {
+    int rc = zen_combo_settings_reset();
+    uint8_t status = rc == 0         ? ZEN_CONFIG_STATUS_OK
+                     : rc == -EBUSY  ? ZEN_CONFIG_STATUS_ERR_BUSY
+                                     : ZEN_CONFIG_STATUS_ERR_GENERIC;
+    send_response(ZEN_CONFIG_CMD_RESET_COMBO, status, NULL, 0);
+}
+
+#endif /* CONFIG_ZEN_RUNTIME_COMBO */
+
+#if IS_ENABLED(CONFIG_ZEN_RUNTIME_MACRO)
+
+static void handle_get_macro_meta(void) {
+    uint8_t response[3] = {
+        (uint8_t)zen_macro_slot_count(),
+        (uint8_t)zen_macro_max_steps(),
+        (uint8_t)ZEN_CONFIG_WIRE_MACRO_MAX_STEPS,
+    };
+    send_response(ZEN_CONFIG_CMD_GET_MACRO_META, ZEN_CONFIG_STATUS_OK, response,
+                  sizeof(response));
+}
+
+static void handle_set_macro(const uint8_t *payload) {
+    uint8_t slot = payload[0];
+    uint8_t count = payload[1];
+
+    if (count > ZEN_CONFIG_WIRE_MACRO_MAX_STEPS) {
+        send_response(ZEN_CONFIG_CMD_SET_MACRO, ZEN_CONFIG_STATUS_ERR_INVALID_PAYLOAD, NULL, 0);
+        return;
+    }
+
+    struct zen_macro_step steps[ZEN_CONFIG_WIRE_MACRO_MAX_STEPS] = {0};
+    for (size_t i = 0; i < count; i++) {
+        const uint8_t *raw = &payload[4 + i * ZEN_CONFIG_WIRE_MACRO_STEP_SIZE];
+        steps[i].op = raw[0];
+        steps[i].value = sys_get_le32(&raw[4]);
+    }
+
+    int rc = zen_macro_set(slot, steps, count);
+    send_response(ZEN_CONFIG_CMD_SET_MACRO,
+                  rc == 0 ? ZEN_CONFIG_STATUS_OK : ZEN_CONFIG_STATUS_ERR_INVALID_PAYLOAD, NULL, 0);
+}
+
+static void handle_get_macro(const uint8_t *payload) {
+    uint8_t slot = payload[0];
+
+    struct zen_macro_step steps[ZEN_CONFIG_WIRE_MACRO_MAX_STEPS] = {0};
+    size_t count = 0;
+    if (zen_macro_get(slot, steps, &count) < 0) {
+        send_response(ZEN_CONFIG_CMD_GET_MACRO, ZEN_CONFIG_STATUS_ERR_INVALID_PAYLOAD, NULL, 0);
+        return;
+    }
+
+    uint8_t response[ZEN_CONFIG_WIRE_MACRO_PAYLOAD_SIZE] = {0};
+    response[0] = slot;
+    response[1] = (uint8_t)count;
+    for (size_t i = 0; i < count && i < ZEN_CONFIG_WIRE_MACRO_MAX_STEPS; i++) {
+        uint8_t *raw = &response[4 + i * ZEN_CONFIG_WIRE_MACRO_STEP_SIZE];
+        raw[0] = steps[i].op;
+        sys_put_le32(steps[i].value, &raw[4]);
+    }
+
+    send_response(ZEN_CONFIG_CMD_GET_MACRO, ZEN_CONFIG_STATUS_OK, response, sizeof(response));
+}
+
+static void handle_save_macro(void) {
+    int rc = zen_macro_settings_save();
+    send_response(ZEN_CONFIG_CMD_SAVE_MACRO,
+                  rc == 0 ? ZEN_CONFIG_STATUS_OK : ZEN_CONFIG_STATUS_ERR_GENERIC, NULL, 0);
+}
+
+static void handle_reset_macro(void) {
+    int rc = zen_macro_settings_reset();
+    send_response(ZEN_CONFIG_CMD_RESET_MACRO,
+                  rc == 0 ? ZEN_CONFIG_STATUS_OK : ZEN_CONFIG_STATUS_ERR_GENERIC, NULL, 0);
+}
+
+#endif /* CONFIG_ZEN_RUNTIME_MACRO */
+
 static void handle_command(uint8_t command, const uint8_t *payload) {
     switch (command) {
     case ZEN_CONFIG_CMD_GET_POINTER:
@@ -625,6 +883,40 @@ static void handle_command(uint8_t command, const uint8_t *payload) {
     case ZEN_CONFIG_CMD_RESET_KEYMAP:
         handle_reset_keymap();
         break;
+#if IS_ENABLED(CONFIG_ZEN_RUNTIME_COMBO)
+    case ZEN_CONFIG_CMD_GET_COMBO_META:
+        handle_get_combo_meta();
+        break;
+    case ZEN_CONFIG_CMD_SET_COMBO:
+        handle_set_combo(payload);
+        break;
+    case ZEN_CONFIG_CMD_GET_COMBO:
+        handle_get_combo(payload);
+        break;
+    case ZEN_CONFIG_CMD_SAVE_COMBO:
+        handle_save_combo();
+        break;
+    case ZEN_CONFIG_CMD_RESET_COMBO:
+        handle_reset_combo();
+        break;
+#endif
+#if IS_ENABLED(CONFIG_ZEN_RUNTIME_MACRO)
+    case ZEN_CONFIG_CMD_GET_MACRO_META:
+        handle_get_macro_meta();
+        break;
+    case ZEN_CONFIG_CMD_SET_MACRO:
+        handle_set_macro(payload);
+        break;
+    case ZEN_CONFIG_CMD_GET_MACRO:
+        handle_get_macro(payload);
+        break;
+    case ZEN_CONFIG_CMD_SAVE_MACRO:
+        handle_save_macro();
+        break;
+    case ZEN_CONFIG_CMD_RESET_MACRO:
+        handle_reset_macro();
+        break;
+#endif
     default:
         send_response(command, ZEN_CONFIG_STATUS_ERR_UNKNOWN_COMMAND, NULL, 0);
         break;
